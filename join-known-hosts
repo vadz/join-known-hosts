@@ -1,0 +1,98 @@
+#!/usr/bin/perl -w
+#
+# This simple script joins all lines using the same key in ~/.ssh/known_hosts.
+#
+# It doesn't touch the original file but output the result on stdout, redirect
+# it to some temporary file and copy it over known_hosts after checking that
+# it contains only the expected changes.
+use autodie;
+use strict;
+use v5.10;
+
+my (%hosts_by_key, %key_type);
+
+my $input_file;
+if (@ARGV == 0) {
+    $input_file = "$ENV{'HOME'}/.ssh/known_hosts"
+} elsif (@ARGV == 1) {
+    $input_file = $ARGV[0];
+} else {
+    die "Usage: $0 [<path-to-ssh-known_host-file>]\n"
+}
+
+my @all_lines;
+
+open my $fh, '<', $input_file;
+while (<$fh>) {
+    chomp;
+    push @all_lines, $_;
+    next if /^ *(#|@|$)/; # Skip comments, markers and empty lines.
+
+    my ($hosts,$type,$key) = split(' ');
+    my @hosts = split(',', $hosts);
+    if (exists $hosts_by_key{$key}) {
+        if ($type ne $key_type{$key}) {
+            die "Key type mismatch at line !: expected $key_type{$key}, not $key.\n";
+        }
+
+        push @{$hosts_by_key{$key}}, @hosts;
+    } else {
+        $hosts_by_key{$key} = \@hosts;
+        $key_type{$key} = $type;
+    }
+}
+
+# Compare hostname in ssh format, putting names before IPs.
+sub cmp_host_or_ip {
+    my ($port_a, $port_b) = (0, 0);
+    if ($a =~ /^\[(.*)\]:(\d+)/) {
+        $a = $1;
+        $port_a = $2;
+    }
+
+    if ($b =~ /^\[(.*)\]:(\d+)/) {
+        $b = $1;
+        $port_b = $2;
+    }
+
+    if ($a =~ /^(?:[0-9]+\.){3}(?:[0-9]+)/) {
+        if ($b =~ /^(?:[0-9]+\.){3}(?:[0-9]+)/) {
+            # Compare as IPs.
+            my @a = split /\./, $a;
+            my @b = split /\./, $b;
+            return $a[0] <=> $b[0] ||
+                   $a[1] <=> $b[1] ||
+                   $a[2] <=> $b[2] ||
+                   $a[3] <=> $b[3] ||
+                   $port_a <=> $port_b
+        } else {
+            # Names come before IPs.
+            return 1
+        }
+    } elsif ($b =~ /^(?:[0-9]+\.){3}(?:[0-9]+)/) {
+        return -1
+    } else {
+        # Compare as names.
+        return $a cmp $b || $port_a <=> $port_b
+    }
+}
+
+foreach (@all_lines) {
+    my @fields = split(' ');
+    my $key = $fields[2];
+    if (exists $hosts_by_key{$key}) {
+        if (defined $hosts_by_key{$key}) {
+            my %host_seen = ();
+            my @hosts = grep { !$host_seen{$_}++ } @{$hosts_by_key{$key}};
+
+            my $sorted_hosts = join(',', sort cmp_host_or_ip @hosts);
+            $_ = "$sorted_hosts $key_type{$key} $key";
+            $hosts_by_key{$key} = undef;
+        } else {
+            # We've already output the line for this key.
+            next;
+        }
+    }
+
+    say;
+}
